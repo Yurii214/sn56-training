@@ -6,7 +6,7 @@ from typing import Optional
 from torch.optim.lr_scheduler import LambdaLR
 
 
-DECAY_FRAC = 0.35
+DECAY_FRAC = 0.20
 FAMILY = "wsd_a0"
 
 _FALSY = ("0", "false", "no", "off")

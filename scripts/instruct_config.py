@@ -129,11 +129,6 @@ def get_instruct_config(param_nums: int) -> dict:
     result = deepcopy(result)
     if param_nums < 9_000_000_000 and param_nums > 8_000_000_000:
         result["batch_size"] = int(2 * result["batch_size"] / 3)
-    # Slightly cooler peak LR than the published 2026-11-16 winner. Combined
-    # with shifted completion-token KL this spends more of the budget on
-    # staying close to the base model on USE_KL instruct tasks.
-    if "lr" in result and result["lr"]:
-        result["lr"] = float(result["lr"]) * 0.9
     return result
 
 

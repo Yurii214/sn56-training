@@ -4,8 +4,8 @@ from typing import Optional
 
 _FALSY = ("0", "false", "no", "off")
 
-MEMBER_MIN_FRAC = 5
-LR_BATCH_EXP = 0.35
+MEMBER_MIN_FRAC = 4
+LR_BATCH_EXP = 0.25
 
 ACTIVE = False
 LR_RESCALE = 1.0

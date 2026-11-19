@@ -89,17 +89,14 @@ class KLRegularizedTrainer(Trainer):
             ce_loss = ce_loss + getattr(self.model.config, "router_aux_loss_coef", 0.0) * aux_loss
 
         if self._kl_active():
-            # Match validator scoring: KL(student || base) on *completion* tokens
-            # after the causal shift, not on unshifted label positions.
-            shift_base_logits = None
-            shift_mask = shift_labels.ne(-100)
-            if shift_mask.any():
+            mask = labels != -100
+            if mask.any():
+                sel_ft = logits[mask]
                 base_logits = self._base_logits(input_ids, attention_mask, position_ids)
-                shift_base_logits = base_logits[:, :-1, :].contiguous()
-                sel_ft = shift_logits[shift_mask]
-                sel_base = shift_base_logits[shift_mask]
-                ft_log_probs = F.log_softmax(sel_ft.float(), dim=-1)
-                base_log_probs = F.log_softmax(sel_base.float(), dim=-1)
+                sel_base = base_logits[mask]
+
+                ft_log_probs = F.log_softmax(sel_ft, dim=-1)
+                base_log_probs = F.log_softmax(sel_base, dim=-1)
                 kl_per_token = (ft_log_probs.exp() * (ft_log_probs - base_log_probs)).sum(dim=-1)
                 kl = kl_per_token.mean()
             else:
@@ -108,7 +105,7 @@ class KLRegularizedTrainer(Trainer):
             loss = ce_loss + self.kl_coef * kl
             if not self._kl_logged:
                 log_info(
-                    f"[justice][kl] shifted-completion kl_coef={self.kl_coef}, "
+                    f"[sn56][kl] ativo kl_coef={self.kl_coef}, "
                     f"fonte={'lora' if self.use_lora_base else 'copia'}, "
                     f"ce={ce_loss.item():.4f}, kl={float(kl):.4f}, loss={loss.item():.4f}"
                 )

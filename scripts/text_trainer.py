@@ -595,6 +595,9 @@ def main():
         tokenize_cmd, os.path.join(ds_folder, f"tokenize_{args.task_id}.log")
     )
 
+    # The validator's KL penalty is measured against the weights it handed out; remember them
+    # before restore-scaling may repoint model_path at a rescaled copy.
+    train_info["train_request"]["kl_reference_path"] = train_info["train_request"]["model_path"]
     if restore_scaling.enabled() and args.task_type in (
             TaskType.INSTRUCTTEXTTASK.value, TaskType.CHATTASK.value):
         train_info = restore_scaling.apply_for_training(

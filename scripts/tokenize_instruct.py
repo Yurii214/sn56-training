@@ -304,6 +304,14 @@ def main(training_request_path: str):
         max_length=max_length,
     )
 
+    # Dev rows follow the grader's length cut (see validator_eval): rows the validator would
+    # drop from its evaluation set must not steer checkpoint/soup selection.
+    import validator_eval
+    dev_max_length = validator_eval.dev_sequence_len(
+        training_request["train_request"]["model_path"], max_length)
+    print(f"dev_max_length={dev_max_length} (train max_length={max_length}, "
+          f"validator cut={validator_eval.eval_sequence_len(training_request['train_request']['model_path'])})")
+
     tokenize_dataset(
         tokenizer,
         dev_path,
@@ -311,7 +319,7 @@ def main(training_request_path: str):
         config_path,
         f"datasets/dev_tokenized_{task_id}.json",
         split=native_tokenize.SPLIT_DEV,
-        max_length=max_length,
+        max_length=dev_max_length,
     )
 
     t2 = datetime.now()

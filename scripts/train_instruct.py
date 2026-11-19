@@ -47,6 +47,7 @@ import packed_fill
 import stop_to_decay
 import depth_first
 import token_budget
+import ema_track
 
 from transformers import (
     Trainer,
@@ -977,6 +978,11 @@ def main():
 
     if ckpt_avg is not None:
         ckpt_avg.trainer = trainer
+    _ema_cb = None
+    if (ckpt_avg is not None and is_final_run and ema_track.enabled() and _avg_mode == "ram"
+            and not _sharded and int(training_args.world_size) == 1):
+        _ema_cb = ema_track.install(trainer, ema_track.EMATracker(ckpt_avg, log=log_info), before=ckpt_avg)
+        log_info("[justice][ema] trajectory EMA armed ahead of the soup callback")
     member_guard.install_a0_timeout(trainer, float(getattr(training_args, "ddp_timeout", 1800) or 1800))
     trainer.tokenizer = tokenizer
 
@@ -1426,10 +1432,17 @@ def main():
         if training_args.use_attn_implementation:
             _kl_attn = training_args.use_attn_implementation
         _kl_device = next(model.parameters()).device
-        trainer.base_model = load_base_model(train_request["model_path"], _kl_attn, _kl_device)
+        _kl_ref = train_request.get("kl_reference_path") or train_request["model_path"]
+        trainer.base_model = load_base_model(_kl_ref, _kl_attn, _kl_device)
         log_info(f"[sn56][kl] modelo base congelado carregado em {_kl_device} (full-FT)")
+        if _kl_ref != train_request["model_path"]:
+            log_info(f"[justice][kl] reference = handed-out weights ({_kl_ref}), not the "
+                     f"restore-scaled copy used for initialisation")
     elif use_kl:
         log_info("[sn56][kl] usando disable_adapter do LoRA como base (sem cópia)")
+        if train_request.get("kl_reference_path") not in (None, train_request["model_path"]):
+            log_info("[justice][kl] WARNING: LoRA base was restore-scaled; KL reference differs "
+                     "from the validator's")
 
     log_info(f"fiscalização a cada {training_args.eval_steps} passos, {len(dev_ds)} na prova")
 
