@@ -35,6 +35,7 @@ GPU_MARGIN_BYTES = 6 << 30
 HOST_MARGIN_BYTES = 8 << 30
 MAX_UPDATE_SHARE = 0.03
 MAX_EVERY = 64
+MIN_SECS_LEFT = 300
 
 
 def enabled() -> bool:
@@ -68,6 +69,18 @@ def _host_available_bytes() -> Optional[int]:
         return None
 
 
+def _seconds_left(end_time) -> Optional[float]:
+    """Seconds until the trainer's UTC deadline string ('%Y-%m-%d %H:%M:%S'), None if unknown."""
+    if not end_time:
+        return None
+    try:
+        from datetime import datetime, timezone
+        end = datetime.strptime(str(end_time), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return (end - datetime.now(timezone.utc)).total_seconds()
+    except Exception:
+        return None
+
+
 def decay_for(planned_steps: int, every: int, horizon: float, min_updates: int = MIN_UPDATES) -> float:
     """Per-update decay so that the EMA time constant spans ``horizon`` of the planned run
     (never shorter than ``min_updates`` updates)."""
@@ -92,6 +105,8 @@ class EMATracker(TrainerCallback):
         self.offered: Optional[dict] = None
         self._t_last_step: Optional[float] = None
         self._step_secs: Optional[float] = None
+        self._armed = False
+        self._initialised = False
 
     # ----- placement -----
     @staticmethod
@@ -120,33 +135,51 @@ class EMATracker(TrainerCallback):
 
     # ----- callbacks -----
     def on_train_begin(self, args, state, control, model=None, **kwargs):
-        if model is None:
+        self._armed = model is not None
+        self._initialised = False
+        if not self._armed:
             self.disabled_reason = "no_model"
-            return
+
+    def _initialise(self, model) -> bool:
+        """Allocate the EMA buffers at the first qualifying step, when optimizer states and the
+        activation peak already exist so the free-memory reading is honest."""
+        self._initialised = True
         try:
             named = self._trainable(model)
             if not named:
                 self.disabled_reason = "no_trainable"
-                return
+                return False
             if any(hasattr(p, "ds_id") or hasattr(p, "_is_flat_param") for _, p in named):
                 self.disabled_reason = "sharded"
-                return
+                return False
             dev, need = self._place(named)
             if dev is None:
                 self.disabled_reason = f"no_room({need / 1e9:.1f}GB)"
                 self.log(f"[justice][ema] disabled: {self.disabled_reason}")
-                return
-            with torch.no_grad():
-                self.ema = [p.detach().to(device=dev, dtype=torch.float32, copy=True) for _, p in named]
+                return False
+            try:
+                with torch.no_grad():
+                    self.ema = [p.detach().to(device=dev, dtype=torch.float32, copy=True) for _, p in named]
+            except torch.OutOfMemoryError:
+                self.ema = None
+                torch.cuda.empty_cache()
+                if dev.type != "cuda":
+                    raise
+                dev = torch.device("cpu")
+                self.log("[justice][ema] GPU OOM while allocating; falling back to host RAM")
+                with torch.no_grad():
+                    self.ema = [p.detach().to(device=dev, dtype=torch.float32, copy=True) for _, p in named]
             self.names = [n for n, _ in named]
             self.where = str(dev)
             self.n_updates = 0
             self.log(f"[justice][ema] tracking {len(named)} tensors ({need / 1e9:.2f}GB fp32) on "
                      f"{self.where}; every={self.every} steps, horizon={self.horizon:.2f} of plan")
+            return True
         except Exception as exc:
             self.ema = None
             self.disabled_reason = f"init_error:{type(exc).__name__}"
             self.log(f"[justice][ema] disabled: {self.disabled_reason}: {exc}")
+            return False
 
     def _decay(self, state) -> float:
         planned = int(getattr(state, "max_steps", 0) or 0)
@@ -169,7 +202,15 @@ class EMATracker(TrainerCallback):
         self.n_updates += 1
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
-        if self.ema is None or model is None:
+        if model is None or not getattr(self, "_armed", False):
+            return
+        if not getattr(self, "_initialised", False):
+            if int(state.global_step) % self.every != 0:
+                return
+            if not self._initialise(model):
+                self._armed = False
+                return
+        if self.ema is None:
             return
         now = time.perf_counter()
         if self._t_last_step is not None:
@@ -217,6 +258,10 @@ class EMATracker(TrainerCallback):
             return
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             self.log("[justice][ema] multi-process run; not offered")
+            return
+        left = _seconds_left(getattr(ca, "end_time", None))
+        if left is not None and left < MIN_SECS_LEFT:
+            self.log(f"[justice][ema] only {left:.0f}s left before the deadline; not offered")
             return
         step = int(state.global_step)
         raw = ca._snapshot(model, step=step, consumer="ema.raw")
